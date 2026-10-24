@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Reply Desk</title>
+<script>
+  // Apply a saved theme before first paint, so dark mode never flashes light.
+  try { const t = localStorage.getItem("reply-desk-theme"); if (t === "dark" || t === "light") document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Schibsted+Grotesk:wght@600;700&display=swap">
+<link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar__inner">
+    <div class="brand">
+      <span class="brand__name">Reply Desk</span>
+      <span class="brand__sub">Vaideesh's WhatsApp agent</span>
+    </div>
+
+    <div class="live" id="live" role="status" aria-live="off">
+      <span class="live__dot" aria-hidden="true"></span>
+      <span class="live__text" id="live-text">Connecting…</span>
+    </div>
+
+    <div class="controls">
+      <div class="control control--switch">
+        <button class="switch" id="auto-switch" type="button" role="switch" aria-checked="false" aria-describedby="auto-hint" disabled>
+          <span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span>
+          <span class="switch__label">Auto-reply</span>
+          <span class="switch__state" id="auto-state">Off</span>
+        </button>
+        <div class="confirm" id="auto-confirm" hidden>
+          <p><strong>Turn on auto-replies?</strong> Clearly safe messages from your contacts will be answered without asking you. Plans, money, serious topics, groups and unknown numbers still wait for you.</p>
+          <div class="confirm__actions">
+            <button class="btn btn--primary" id="auto-confirm-yes" type="button">Turn on</button>
+            <button class="btn" id="auto-confirm-no" type="button">Keep off</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="control control--switch">
+        <button class="switch switch--live" id="live-switch" type="button" role="switch" aria-checked="false" disabled>
+          <span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span>
+          <span class="switch__label">Live sending</span>
+          <span class="switch__state" id="live-state">Dry run</span>
+        </button>
+        <div class="confirm" id="live-confirm" hidden>
+          <p><strong>Send real messages?</strong> The WhatsApp client stops dry-running and sends replies and approved drafts to your contacts.</p>
+          <div class="confirm__actions">
+            <button class="btn btn--primary" id="live-confirm-yes" type="button">Go live</button>
+            <button class="btn" id="live-confirm-no" type="button">Stay in dry run</button>
+          </div>
+        </div>
+      </div>
+
+      <button class="btn btn--kill" id="kill-switch" type="button">🛑 Kill switch</button>
+
+      <button class="switch switch--theme" id="theme-switch" type="button" role="switch" aria-checked="false">
+        <span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span>
+        <span class="switch__label">Dark mode</span>
+      </button>
+    </div>
+  </div>
+  <div class="kill-banner" id="kill-banner" role="alert" hidden>
+    <span>🛑 Kill switch is on. The WhatsApp client is processing and sending nothing until you clear it.</span>
+    <button class="btn btn--clear" id="clear-kill" type="button">Clear kill switch</button>
+  </div>
+  <p class="banner" id="auto-banner" hidden>Auto-replies are on. Clearly safe messages are answered on their own; everything else waits here.</p>
+</header>
+
+<main class="desk">
+  <section class="stats" aria-label="Totals">
+    <div class="stat"><span class="stat__value" id="stat-processed">–</span><span class="stat__label">Messages processed</span></div>
+    <div class="stat"><span class="stat__value" id="stat-auto">–</span><span class="stat__label" id="stat-auto-label">Auto-replied</span></div>
+    <div class="stat stat--hold"><span class="stat__value" id="stat-waiting">–</span><span class="stat__label">Waiting for you</span></div>
+    <div class="stat"><span class="stat__value" id="stat-approved">–</span><span class="stat__label">Approved and sent</span></div>
+  </section>
+
+  <div class="columns">
+    <section class="panel" aria-labelledby="queue-title">
+      <form class="timing" id="timing" novalidate>
+        <span class="timing__title">Reply timing</span>
+        <label for="min-delay">Wait at least</label>
+        <input type="number" id="min-delay" min="0.5" step="0.5" inputmode="decimal">
+        <label for="max-delay">and at most</label>
+        <input type="number" id="max-delay" min="0.5" step="0.5" inputmode="decimal">
+        <span class="timing__unit">seconds before replying</span>
+        <button class="btn" id="save-delays" type="submit">Save</button>
+        <p class="timing__error" id="delay-error" role="alert"></p>
+      </form>
+      <div class="panel__head">
+        <h2 id="queue-title">Waiting for you</h2>
+        <span class="count" id="queue-count" aria-live="polite">0</span>
+      </div>
+      <p class="panel__hint">Edit the draft if you like, then approve it. The WhatsApp client sends it within a few seconds.</p>
+      <div class="queue" id="queue">
+        <div class="empty">Nothing waiting for you. Held drafts appear here with a reply you can edit.</div>
+      </div>
+      <h3 class="subhead">Recently decided</h3>
+      <ul class="recent" id="recent"><li class="empty empty--small">No decisions yet.</li></ul>
+    </section>
+
+    <section class="panel" aria-labelledby="feed-title">
+      <div class="panel__head">
+        <h2 id="feed-title">Live feed</h2>
+        <span class="panel__meta">last 20 messages, newest first</span>
+      </div>
+      <ol class="feed" id="feed">
+        <li class="empty">waiting for first message...<br><span class="muted">Messages appear here as soon as the WhatsApp client passes them to the agent.</span></li>
+      </ol>
+    </section>
+  </div>
+</main>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<script src="/assets/app.js"></script>
+</body>
+</html>

@@ -1,265 +1,278 @@
-# Architecture — WhatsApp Cruise Control
+# Architecture
 
-> Hands-free WhatsApp replies, written in my own voice, by a local AI agent that uses retrieval (RAG) instead of fine-tuning.
-
-This document explains how the whole system fits together before any code gets written. Every later session builds one box from this map, so when something breaks in Week 3 or Week 4, this is the page to come back to.
+This page explains how the WhatsApp Agent works: what each part does, what it needs, what it produces, and how a single message travels from your phone to a reply. It stays at the level of "what and why", not line-by-line code. For installation and commands, see the [README](README.md).
 
 ---
 
-## 1. The problem, in plain words
+## 1. The big picture
 
-I get a steady stream of WhatsApp messages: family checking in, friends sending memes, clients asking for an update. Most of them need a short, ordinary reply that I'd write the same way every time. Some of them really need *me*: money, serious news, anything from a stranger.
+You get a steady stream of WhatsApp messages. Many need a short, ordinary reply you'd write the same way every time: "Reached?", "Got it, I'll check and get back to you". Some really need *you*: money, plans, anything serious, anyone you don't know.
 
-The goal is a small assistant that:
+The agent handles the first kind and steps aside for the second. For every incoming message it:
 
-- reads an incoming message,
-- works out who sent it and whether it's safe to answer automatically,
-- looks at how I've actually replied to similar messages in the past,
-- writes a reply that sounds like me *for that relationship* (I don't text my mother the way I text a client),
-- waits a natural few seconds, and sends it.
+1. works out **who** sent it (family, friend, partner, colleague, client, or a stranger);
+2. decides whether it's **safe** to answer at all;
+3. looks up how you've **actually replied** to similar messages before;
+4. writes a draft **in your voice for that relationship**;
+5. **checks the draft** for anything that commits you to something;
+6. either sends it after a natural pause, or puts it in front of you to approve.
 
-Anything it isn't sure about, it leaves alone for me.
+If you could hand a trusted assistant years of your chats and a short note on how you talk to each kind of person, this is what they'd do: read the message, decide whether it's theirs to answer, glance back at how you handled something similar, and reply the way you would, or leave it on your desk.
 
-### The non-technical version
+### The two brains
 
-> It's like a personal assistant who has read years of my WhatsApp chats and carries a short note describing how I talk. When a message comes in, they check who it's from, decide whether it's something they should handle or pass to me, flip back through my old chats to see how I answered something similar, and then write a reply the way I would, after a short pause so it doesn't look robotic.
+The agent draws on two separate kinds of knowledge, and keeps them apart on purpose.
 
-If I can explain the project like that to a friend, the architecture is clear in my head.
+| | Persona Brain | History Brain |
+|---|---|---|
+| **What it is** | A hand-written description of how you talk (`persona/persona.json`) | Your real chat history, as "they said → I replied" pairs, stored in ChromaDB |
+| **What it knows** | Your identity, your tone for each relationship, typical message length, favourite emoji, and hard rules the agent must never break | What you actually said, word for word, to messages like this one |
+| **How it's used** | The section for the sender's relationship goes into every prompt | The 3 most similar past exchanges, from the same relationship only, go into the prompt as examples |
+| **Analogy** | The character brief an actor reads before every scene | The actor's diary of what they said the last few times |
 
----
+With only the persona, replies have the right tone but generic content. With only the history, replies are specific but fall apart on anything new. Together, the persona keeps new situations in character and the history keeps familiar ones real.
 
-## 2. Design goals
+This approach is called **retrieval** (or RAG: "look things up, then write"), as opposed to **fine-tuning** (retraining the AI model itself on your chats). Retrieval is free, updates the moment you add new chats, and can always show *why* it wrote a reply, because you can see exactly which past messages it used.
 
-| Goal | What it means in practice |
-|---|---|
-| **Sounds like me** | Tone, length, emoji habits and Hinglish match the relationship. |
-| **Knows when to stay quiet** | Money, serious topics, strangers and group chats are never auto-answered. |
-| **Explainable** | For any reply, I can see *why*: which past messages were pulled up and which persona tone was used. |
-| **Free and local** | Runs on my laptop. Free-tier model only. No paid fine-tuning, no GPU. |
-| **Easy to keep fresh** | New chats can be added any time without retraining anything. |
-| **Safe by default** | Runs on a dedicated/secondary WhatsApp number, never my primary one. |
+### Relationship categories
 
----
+Everyone is sorted into one category, and each category has its own persona section and its own slice of history:
 
-## 3. Why retrieval (RAG) and not fine-tuning
+| Category | Who | Typical voice |
+|---|---|---|
+| `family` | Amma, Appa, relatives | Short, practical, Tanglish with Amma, English with Appa |
+| `friends` | College friends | Relaxed Tanglish, "da" |
+| `girlfriend` | Partner | Warm, playful Tanglish |
+| `professional` | Colleagues, teachers, services | Polite, plain English |
+| `business_freelance` | Directors, DPs, studios, clients | Collaborative, technical, "check once" |
+| `unknown` | Anyone not in your contacts | Never answered automatically |
 
-Fine-tuning would mean retraining a model's internal weights on all my chats so the model itself "becomes" me. It's the wrong tool here for four reasons:
-
-1. **Cost and access.** Fine-tuning needs paid API access or my own GPU. RAG uses a model I never modify; I just give it the right context at the right moment.
-2. **It goes stale.** A fine-tuned model is frozen at the version of me it was trained on. With RAG, memory is just a database: add new messages and the agent knows them immediately.
-3. **It's a black box.** If a fine-tuned model says something odd, the reason is buried in millions of weights. With RAG I can say: "these three past messages were retrieved, and this persona tone was applied." That trace is what the live console will show in Week 4.
-4. **It blends identity and memory together.** Fine-tuning mixes "how I generally talk" with "what I said to this one person" into a single blob. RAG keeps them as two separate, inspectable things. That separation is the whole "two-brain" idea.
-
----
-
-## 4. The two brains
-
-### Brain 1 — The Persona Brain (who I am)
-
-- **What it is:** a hand-written persona file, authored once (Session 1.2).
-- **What's in it:** my identity and interests, how my tone shifts between family / friends / professional / unknown contacts, my Hinglish habits, typical emoji use, typical message length, and a few example replies (few-shot examples).
-- **How it's used:** on *every* generation, the section for the current relationship is placed at the top of the prompt as a character sheet. Nothing is trained; the model is simply reminded who it's playing.
-- **What it does NOT contain:** specific past conversations.
-- **Analogy:** the character brief you hand an actor before every take.
-
-### Brain 2 — The History Brain (how I've actually replied)
-
-- **What it is:** my real WhatsApp history, cleaned into pairs of *"they said X → I replied Y"*, stored in a vector database (ChromaDB) so it can be searched by meaning, not exact words.
-- **How it's organised:** split into separate collections, one per relationship: `family`, `friends`, `professional`, `unknown`. When a client messages, only professional history is searched, so friend-group inside jokes can never leak into a work reply.
-- **How it's used:** for a new message, the agent finds the 2–3 most similar past messages *in the matching collection* and adds my real replies to the prompt as examples.
-- **Analogy:** the actor's own diary of what they said the last few times someone said something like this.
-
-### Why both are needed
-
-| Setup | Result |
-|---|---|
-| Persona only | Right tone, generic content. Sounds like a caricature of me. |
-| History only | Specific, but no personality glue, and lost on any message type it hasn't seen before. |
-| **Both** | The persona keeps brand-new situations in character; the history keeps familiar ones specific and real. |
+Keeping history separate per category means a client can never get a reply shaped by your friends' banter.
 
 ---
 
-## 5. The pipeline, stage by stage
+## 2. The main components
 
-One sentence to remember:
+| Component | Language | Runs as | Role |
+|---|---|---|---|
+| **WhatsApp client** | Node.js | `node whatsapp/baileys_client.js` | Connects to WhatsApp, hands each new message to the bridge, sends replies |
+| **Bridge** | Python (FastAPI) | `python3 agent/bridge.py` on port 5001 | The agent's front door: runs the whole decision pipeline for each message |
+| **Agent core** | Python | used by the bridge | Router, decision engine, generator, draft check, approval queue |
+| **History Brain** | Python + ChromaDB | `chroma run …` on port 8000 | Stores and searches your past replies |
+| **Persona Brain** | JSON | read on every draft | How you talk to each kind of person |
+| **Reply Desk** | Python (FastAPI) + HTML/JS | `python3 console/app.py` on port 5002 | Your dashboard: live feed, approvals, auto-reply switch |
+| **Setup scripts** | Python | run by hand, occasionally | Turn chat exports and contacts into the maps and the history database |
 
-> **message in → who is it → should I even reply → what have I said before to people like this → who am I when I talk to them → write it → wait a beat → send it.**
+Python does the thinking; Node does the WhatsApp talking. They speak to each other over plain HTTP on your own machine (`127.0.0.1`), so nothing is exposed to the network.
+
+---
+
+## 3. How a live message flows
+
+```mermaid
+flowchart TD
+    WA(["New WhatsApp message"]) --> NC["WhatsApp client<br/>whatsapp/baileys_client.js"]
+    NC -- "history sync or<br/>your own message" --> SKIP["Skipped"]
+    NC -- "POST /process" --> BR["Bridge<br/>agent/bridge.py"]
+
+    BR --> RT["Router<br/>who is this?"]
+    RT -- "group, status, channel" --> IGN["Ignored<br/>left for you"]
+    RT --> DE{"Decision engine<br/>should we reply?"}
+    DE -- "own message, unknown sender,<br/>media only, forwarded, ok/thanks,<br/>money or serious" --> IGN
+    DE -- "safe, or asks for<br/>a commitment" --> GEN["Generator<br/>writes a draft"]
+
+    CH[("ChromaDB<br/>History Brain")] -- "3 similar past replies" --> GEN
+    PJ[["persona.json<br/>Persona Brain"]] -- "tone and hard rules" --> GEN
+    GEN -- "prompt" --> LLM["Gemini"]
+    LLM -- "draft" --> GEN
+
+    GEN --> DG["Draft check<br/>holds anything that<br/>commits you"]
+    DG --> GATE{"Clearly safe and<br/>auto-reply on?"}
+    GATE -- "yes" --> SEND["Client re-checks kill switch<br/>and allowlist, waits 3 to 12 s,<br/>then sends (only logs in dry run)"]
+    GATE -- "no" --> AQ[("Approval queue")]
+    AQ --> RD["Reply Desk<br/>you approve, edit,<br/>or dismiss"]
+    RD -- "approve" --> OB["Outbox"]
+    OB -- "client checks<br/>every 3 s" --> SEND
+
+    BR -. "every decision" .-> FEED[("Live feed log")]
+    FEED -.-> RD
+```
+
+**Reading the diagram:** solid arrows are the path of one message, and dotted arrows are logging for Reply Desk. The decision engine also uses Gemini, but only once, as its last check (see [section 5](#5-how-the-pieces-connect)).
+
+---
+
+## 4. One-time setup flow
+
+Before the agent can answer anything, your chat exports and contacts are turned into two maps and a searchable history. You run these scripts by hand once, and again whenever you add new exports.
 
 ```mermaid
 flowchart LR
-    A[1. Message In] --> B[2. Router<br/>number → relationship]
-    B --> C{3. Decision Engine<br/>reply or ignore?}
-    C -- ignore --> X[Left for me<br/>no auto-reply]
-    C -- reply --> D[4. Retrieval<br/>History Brain]
-    D --> E[5. Persona Injection<br/>Persona Brain]
-    E --> F[6. Generation<br/>LLM]
-    F --> G[7. Human-like Delay]
-    G --> H[8. Send via Baileys]
+    EX["Chat exports<br/>Whatsapp chats/"] --> PE["parse_export.py"]
+    PE --> PP[("processed_pairs.jsonl<br/>they said → I replied")]
+    PP --> VP["validate_pairs.py<br/>quality report"]
+    PP --> BRM["build_relationship_map.py"]
+    BRM --> CRM[["contact_relationship_map.json<br/>chat id → category"]]
+    YOU1(["You fill in<br/>categories"]) --> CRM
+    PP --> EMB["embed_to_chroma.py"]
+    CRM --> EMB
+    EMB --> CH[("ChromaDB<br/>one collection per category")]
 
-    classDef rules fill:#e5e7eb,stroke:#6b7280,color:#111;
-    classDef history fill:#dbeafe,stroke:#2563eb,color:#111;
-    classDef persona fill:#dcfce7,stroke:#16a34a,color:#111;
-    classDef llm fill:#ede9fe,stroke:#7c3aed,color:#111;
-    classDef plumbing fill:#ffffff,stroke:#9ca3af,color:#111;
-
-    class B,C rules;
-    class D history;
-    class E persona;
-    class F llm;
-    class A,G,H,X plumbing;
+    CT[["contacts.md<br/>names and numbers"]] --> BPM["build_phone_map.py"]
+    BPM --> RM[["relationship_map.json<br/>phone → category"]]
+    YOU2(["You fill in<br/>categories"]) --> RM
+    RM --> LIVE["Used by the live router"]
+    CH --> LIVE2["Searched by the live generator"]
 ```
 
-**Colour key:** grey = plain rules, no AI · blue = History Brain · green = Persona Brain · purple = where both brains meet the AI · white = plumbing.
+There are two maps because they answer two different questions:
 
-| # | Stage | Built in | Input | Output | Uses AI? |
-|---|---|---|---|---|---|
-| 1 | **Message In** | Week 4.1 | raw WhatsApp event | phone number + text | No |
-| 2 | **Router** | Week 3.1 | phone number | relationship tag (e.g. `friend`) | No — lookup table |
-| 3 | **Decision Engine** | Week 3.2 | tag + text | `reply` or `ignore` | Only as the last check |
-| 4 | **Retrieval** | Week 2 | text + tag | top 2–3 similar past exchanges | Embeddings only |
-| 5 | **Persona Injection** | Week 1.2 | tag | prompt with tone + retrieved examples | No |
-| 6 | **Generation** | Week 4 | enriched prompt | draft reply | **Yes** (Gemini, free tier) |
-| 7 | **Human-like Delay** | Week 4 | draft reply | random wait of a few seconds | No |
-| 8 | **Send** | Week 4.1 | reply | delivered message | No |
+- **`relationship_map.json`** answers "*who is texting me right now?*" It's keyed by phone number, because that's how a live WhatsApp message identifies its sender.
+- **`contact_relationship_map.json`** answers "*which category does this old chat belong to?*" It's keyed by an anonymous chat id (like `chat-e9b783a5b9`), so contact names never end up in the history database.
 
-### Stage notes
-
-**1. Message In.** At this point the agent knows nothing except a phone number and some text.
-
-**2. Router.** A simple table I maintain myself (e.g. `contacts.json` / `contacts.csv`) maps numbers to `family`, `friend`, `professional`. Anything not in the table is `unknown`. Deliberately not AI: it's fast, free, and never guesses wrong about who my mother is.
-
-**3. Decision Engine.** Layered checks, cheapest first, so the AI is only consulted when the rules can't decide:
-
-1. **Hard rules** — blocklist, group chats, unknown senders → ignore.
-2. **Signal rules** — keywords/regex for money, payments, OTPs, urgent or serious topics → ignore.
-3. **Intent check** — if still ambiguous, one small AI call classifies whether this is safe, casual chat.
-4. **Reply policy** — per-relationship settings (e.g. auto-reply on for friends, off for professional during work hours).
-
-The rule of thumb: **when in doubt, don't reply.** A missed auto-reply costs nothing; a wrong one can cost a relationship or a client.
-
-**4. Retrieval.** Search *only* the matching relationship's ChromaDB collection for the 2–3 nearest past messages, and pull my actual replies to them.
-
-**5. Persona Injection.** Combine the persona section for that relationship with the retrieved examples into a single prompt.
-
-**6. Generation.** The model writes the reply using steps 4 and 5. It never sees the raw chat database, only the handful of examples chosen for this message.
-
-**7. Human-like Delay.** A short random wait so replies don't arrive in 200 ms, which instantly gives a bot away.
-
-**8. Send.** Baileys pushes the reply back through WhatsApp.
+Both maps are filled in by you; the scripts never guess a relationship.
 
 ---
 
-## 6. How a single message travels (worked example)
+## 5. How the pieces connect
 
-> A friend texts: *"bro free this weekend? movie plan"*
+Here is one message's journey, in order.
 
-1. **Message In:** `+91 9xxxx xxxxx`, `"bro free this weekend? movie plan"`
-2. **Router:** number found in contacts → `friend`
-3. **Decision Engine:** not a group, not blocked, no money/serious keywords, casual plan → `reply`
-4. **Retrieval:** searches `friends` collection → finds three past "weekend plan?" messages and how I answered them
-5. **Persona Injection:** friend-tone section (casual, Hinglish, short, a couple of emojis) + those three examples
-6. **Generation:** something like *"haan free hu saturday evening 🍿 which one?"*
-7. **Delay:** waits ~6 seconds
-8. **Send:** reply delivered
+**1. A message arrives.** The WhatsApp client receives it through Baileys. It ignores anything that isn't a genuinely new message (WhatsApp replays old messages when you first connect) and anything you sent yourself. For the rest, it pulls out the sender's ID, the text or caption, the message type, and whether it was forwarded, then sends them to the bridge.
 
-> A client texts: *"Can you share the invoice for last month's grade?"*
+**2. The router identifies the sender.** WhatsApp identifies chats by an ID called a **JID**, for example `919025877874@s.whatsapp.net` for a person or `…@g.us` for a group. The router turns a person's JID into a phone number and looks it up in `relationship_map.json`. Group chats, status updates and channels are stopped right here, before the map is even read. Numbers not in the map become `unknown`.
 
-Router → `professional`. Decision Engine sees *invoice* → money signal → `ignore`. Nothing is sent; it waits for me.
+**3. The decision engine decides whether to reply.** It works through layers, cheapest first, and stops at the first "no":
+
+- **Hard rules**, which are instant: your own message, groups, unknown senders.
+- **Signal rules**, still instant: photos or voice notes with no caption, forwarded messages, one-word replies like "ok" or "thanks".
+- **Intent check**, a single Gemini call that labels the message as safe, as *money or serious*, or as *asking you to commit* to a plan, invite, call or time. Money and serious topics are left for you. A commitment request still gets a draft, but that draft must be approved. If Gemini's answer is anything unexpected, the engine **fails closed**: it treats the message as serious and leaves it alone.
+
+**4. The generator writes a draft.** It asks the History Brain for your three most similar past exchanges in the same category, adds the persona section for that relationship and your hard rules, and asks Gemini for one short reply. The prompt tells it never to commit you to plans, and never to invent where you are or what you're doing; it leaves a `[placeholder]` instead.
+
+**5. The draft check reviews it.** This last check uses no AI, just fixed word lists, so the same draft always gets the same verdict. It holds any draft that says yes or agrees ("aama", "sure", "ok da", "varen", "pesalam"…), names a time or day, contains a placeholder, or is empty. Drafts for unknown senders are always held, and are never allowed to confirm your name.
+
+**6. The bridge makes the final call.** A draft is sent automatically only if it passed every check **and** the auto-reply switch is on. Otherwise it's stored in the approval queue. Either way, the decision is written to the live feed log.
+
+**7. You decide, in Reply Desk.** Held drafts appear with the sender's name, their message, the reason the draft was held, and an editable reply. **Approve** puts your reply in the outbox; **Dismiss** drops it.
+
+**8. The client sends.** The client reads `config/settings.json` fresh for every message. For an automatic reply it waits a random delay (3 to 12 seconds by default) so it doesn't look robotic. For approved replies, it checks the outbox every 3 seconds. Right before any send, it re-checks the kill switch and checks the sender against `relationship_map.json` itself, independently of the bridge; a sender who isn't mapped to a real category is blocked. If `dry_run` is on, it only logs what it would have sent. While `kill_switch.flag` exists, the client does nothing at all.
 
 ---
 
-## 7. Tech stack
+## 6. Module breakdown
 
-| Layer | Tool | Why | Needed from |
+### WhatsApp side
+
+| Module | Purpose | Inputs | Output |
 |---|---|---|---|
-| Editor + pair-programmer | VS Code, GitHub Copilot + Copilot Chat | Every session's build prompts run here | Now |
-| Version control | Git + GitHub | Track every session's changes | Now |
-| Data processing, retrieval, generation | Python 3.10+ | Parsing chats, ChromaDB, LLM calls | Now |
-| WhatsApp connection | Node.js 18+ with Baileys | Sends/receives WhatsApp messages | Week 4 |
-| Memory (History Brain) | ChromaDB (local) | Free vector store, one collection per relationship | Week 2 |
-| Language model | Gemini Flash via free API key (Google AI Studio) | Free tier, fast enough for chat | Week 1.2 onward |
-| Live console | Streamlit | Shows each message's route, retrieved context and decision | Week 4 |
-| Diagrams | Excalidraw, Mermaid | Architecture sketch + text version in this file | Now |
+| `whatsapp/baileys_client.js` | Connects to WhatsApp as a linked device, forwards new messages to the bridge, sends replies. | WhatsApp events; bridge responses; the outbox; `config/settings.json`; `kill_switch.flag`; `config/relationship_map.json` (its own allowlist check) | Calls to the bridge; sent messages, or `[DRY_RUN]` log lines; saved login in `auth_info_baileys/` |
 
-Secrets (the Gemini API key) live in a `.env` file that is **never committed**.
+### Agent core (`agent/`)
 
----
-
-## 8. Planned project layout
-
-This will grow session by session; it's the target shape, not what exists today.
-
-```
-whatsapp-cruise-control/
-├── README.md
-├── Architecture.md              ← this file
-├── .env                         ← GEMINI_API_KEY (git-ignored)
-├── .gitignore
-├── docs/
-│   ├── architecture_diagram.png
-│   └── architecture_diagram.excalidraw
-├── persona/
-│   └── persona.md               ← Persona Brain (Session 1.2)
-├── data/
-│   ├── raw/                     ← WhatsApp exports (git-ignored)
-│   └── processed/               ← cleaned "they said → I replied" pairs
-├── history/                     ← ChromaDB store (git-ignored)
-├── config/
-│   ├── contacts.json            ← Router lookup table
-│   └── rules.yaml               ← Decision Engine keywords & policies
-├── src/
-│   ├── ingest/                  ← Week 2: parse + split by relationship
-│   ├── router/                  ← Week 3.1
-│   ├── decision/                ← Week 3.2
-│   ├── retrieval/               ← Week 2
-│   ├── generate/                ← persona injection + LLM call
-│   └── console/                 ← Streamlit dashboard
-└── bot/                         ← Node.js + Baileys (Week 4)
-```
-
-Python handles the "thinking" (route, decide, retrieve, generate); Node handles the WhatsApp socket. The two talk over a small local interface, set up in Week 4.
-
----
-
-## 9. Build roadmap
-
-| Week | Theme | Sessions | Box from the pipeline |
+| Module | Purpose | Inputs | Output |
 |---|---|---|---|
-| 1 | **The Ghostwriter** — teach it my voice | 1.1 Two-Brain Architecture · 1.2 Build the Persona File | Persona Injection |
-| 2 | **The Curator** — give it memory | 2.1 Mine my history · 2.2 Sort by relationship | Retrieval |
-| 3 | **The Router** — teach it judgement | 3.1 Who's texting? · 3.2 Reply or ignore? | Router, Decision Engine |
-| 4 | **The Puppetmaster** — connect it to WhatsApp | 4.1 Wire up Baileys · 4.2 Go live | Message In, Delay, Send |
+| `bridge.py` | The local web server the client talks to. Runs the pipeline, applies the auto-reply switch, records held drafts, serves the outbox. | A message (`jid`, `text`, `message_type`, `is_forwarded`, `from_me`, optional `chat_jid`) | A decision (`should_reply`, `reply`, `relationship`, `reason`, `status`, …); a line in `logs/console_feed.jsonl` |
+| `router.py` | Works out the sender's category from their JID. | A JID; `config/relationship_map.json` | A category and the history collection to search, or "group" with no collection |
+| `decision_engine.py` | Decides whether a message deserves a reply. | The message and its category | Yes or no, with a reason; a line in `logs/decision_log.jsonl` |
+| `generator.py` | Writes a draft in your voice. | The message text and category; `persona.json`; similar past replies | The draft text, or a safe placeholder if the AI returned nothing |
+| `draft_guard.py` | Holds drafts that commit you to something, using fixed word lists (no AI). | A draft and its category | OK, or "needs approval" with the reason |
+| `pipeline.py` | Runs decision → draft → draft check in order. | A message and its category | `ready`, `needs_approval` or `ignored`, plus the draft and reasons |
+| `approvals.py` | The approval queue, shared safely by the bridge and Reply Desk. | Held drafts; your approve and dismiss decisions; the client's "sent" reports | Records in `data/agent_state.sqlite3` moving through pending → approved → sent, dry run, or dismissed |
+| `settings.py` | Reads and writes the auto-reply switch. | `config/auto_reply.json` | On or off. Anything other than an explicit `true` counts as off. |
+| `gemini.py` | Creates the shared Gemini connection. | `GEMINI_API_KEY` from `.env` | A ready-to-use client for model `gemini-3.5-flash` |
+| `batch_test.py` | A demo run of 11 sample messages through every layer. | Your phone map; Gemini | A summary table in the terminal |
+
+### History Brain (`ingestion/`)
+
+| Module | Purpose | Inputs | Output |
+|---|---|---|---|
+| `parse_export.py` | Turns chat exports into clean "they said → I replied" pairs: skips media, system lines and one-word acks, splits conversations at long gaps, and masks emails, numbers and passwords. | `Whatsapp chats/**/*.txt`; your name (`--name`) | `data/processed_pairs.jsonl` |
+| `validate_pairs.py` | Quality report on the pairs. | The pairs file; the exports | Pass or fail checks and a random sample, printed |
+| `build_relationship_map.py` | Adds any new chat ids to the chat-category map, without touching ones you've filled in. | The pairs file | `config/contact_relationship_map.json`, with new ids set to `REPLACE_ME` |
+| `validate_relationship_map.py` | Confirms every chat with history has a category. | Pairs file; chat map | PASS, or FAIL with what's missing |
+| `build_phone_map.py` | Adds new phone numbers from your contacts to the phone-category map, keeping everything you've set. | `config/contacts.md`; your name | `config/relationship_map.json`, with new numbers set to `REPLACE_ME`; a backup in `config/backups/` |
+| `validate_phone_map.py` | Confirms the phone map is safe for live routing. | Phone map; contacts | PASS, or FAIL with each problem |
+| `embed_to_chroma.py` | Turns each "they said" message into a meaning-vector and stores it, so it can be searched by meaning. | Pairs file; chat map | ChromaDB collections, one per category, matching the pairs file exactly |
+| `retrieval.py` | Finds your most similar past exchanges for a new message. | A category, a message, how many results | A list of past exchanges with similarity scores |
+| `retrieval_demo.py` | Tries out retrieval from the terminal. | Optional category, contact, JID or query | Readable result blocks and a sanity check |
+| `whatsapp_ids.py` | Understands WhatsApp IDs and phone formats. | JIDs, phone numbers | Normalised numbers; what kind of chat a JID is |
+
+### Persona Brain (`persona/`)
+
+| Module | Purpose | Inputs | Output |
+|---|---|---|---|
+| `persona.json` | How you talk to each kind of person, plus hard rules. | Written by hand | Read by the generator for every draft. Its relationship sections also define the list of categories. |
+| `build_persona.py` | Measures your style from an export: how much Tanglish, message length, top emoji. | One iPhone-format export; your name | A style-signals JSON file (generated, git-ignored), to help you write `persona.json` |
+
+### Reply Desk (`console/`, `frontend/`)
+
+| Module | Purpose | Inputs | Output |
+|---|---|---|---|
+| `console/app.py` | Serves Reply Desk and its API: live feed with contact names, approval queue, the auto-reply switch, live/dry-run sending, reply delays, and the kill switch. It accepts changes only from its own page. | Feed log; approval queue; `contacts.md`; `config/settings.json`; `kill_switch.flag` | Web pages at port 5002 (`/` and `/basic`); switch and settings changes (written atomically); approvals into the outbox |
+| `frontend/` (`index.html`, `styles.css`, `app.js`) | The dashboard in your browser. Refreshes every 2 seconds, with light and dark themes. | The console API | What you see and click |
+
+### Configuration (`config/`)
+
+| File | Holds |
+|---|---|
+| `contacts.md` | Your address book: names and phone numbers |
+| `relationship_map.json` | Phone number → category (the live router's table) |
+| `contact_relationship_map.json` | Anonymous chat id → category (for filing history) |
+| `auto_reply.json` | The auto-reply switch |
+| `settings.json` | The client's `dry_run` flag and pre-send delay range |
+| `settings.py` | Python helpers for the settings (including safe, atomic saving), the kill switch, and the allowlist |
+| `constants.py` | The one-word acknowledgements list |
 
 ---
 
-## 10. Safety, privacy and guardrails
+## 7. Safety, layer by layer
 
-- **Dedicated number only.** Baileys is an unofficial WhatsApp Web client. Using it can break WhatsApp's terms and risk a ban, so this runs on a spare SIM or secondary account, never my primary number.
-- **Other people's words.** My exports contain messages from friends, family and clients. Raw exports and the ChromaDB store stay local and are git-ignored.
-- **Default to silence.** Unknown senders, groups, money and serious topics are never auto-answered.
-- **Relationship isolation.** Separate collections mean the wrong tone or a private joke can't leak across contexts.
-- **Kill switch.** One config flag (or stopping the Node process) turns auto-replies off instantly.
-- **Visible reasoning.** The console logs, for every message: relationship tag, decision and reason, retrieved examples, and the final reply.
+No single check is trusted on its own. Each risk is caught in at least two places.
+
+| Risk | Where it's caught |
+|---|---|
+| Replying in a group | Router (group IDs never routed), decision engine (hard rule), client (refuses to send to groups) |
+| Replying to a stranger | Router (`unknown`), decision engine (hard rule), draft check (always holds, never confirms your name) |
+| Agreeing to plans, calls or times | Decision engine (intent check), prompt (never a firm yes), draft check (word lists) |
+| Money or serious topics | Decision engine (intent check; anything unclear counts as serious) |
+| Sending anything at all | Auto-reply switch (off by default), dry run in `settings.json` (on by default), and the kill switch (`kill_switch.flag`), which stops everything |
+| Sending to someone not in your contacts | The client's own allowlist check against `relationship_map.json`, right before every send, regardless of what the bridge decided |
+| A broken config file | Map loading fails loudly instead of guessing; maps are written atomically, so a crash can't leave a half-written file |
+| Another website controlling Reply Desk | Reply Desk accepts changes only from its own page, on this machine |
+| Leaking private data | Exports, pairs, the database, logs, contacts and the phone map are all git-ignored; pairs have emails, numbers and passwords masked |
 
 ---
 
-## 11. Glossary
+## 8. Where data lives
+
+| Location | Contents | In git? |
+|---|---|---|
+| `Whatsapp chats/` | Your chat exports | Yes (private repository) |
+| `data/processed_pairs.jsonl` | Cleaned pairs | No |
+| `data/agent_state.sqlite3` | The approval queue | No |
+| `chroma_data/` | The ChromaDB history database | No |
+| `logs/console_feed.jsonl` | Every bridge decision, for Reply Desk | No |
+| `logs/decision_log.jsonl` | Every decision-engine verdict | No |
+| `auth_info_baileys/` | Your WhatsApp login | No, never |
+| `.env` | Your Gemini API key | No, never |
+
+---
+
+## 9. Glossary
 
 | Term | Plain meaning |
 |---|---|
-| **LLM** | The AI model that writes text (here, Gemini). |
-| **RAG** | Retrieval-Augmented Generation: look up relevant notes first, then write. |
-| **Embedding** | Turning a sentence into numbers so "similar meaning" can be measured. |
-| **Vector database** | A store that searches by meaning (ChromaDB). |
-| **Few-shot prompt** | Giving the model a few examples of the style you want, right inside the prompt. |
-| **Fine-tuning** | Retraining the model itself on new data. Not used here. |
-| **Baileys** | A Node.js library that connects to WhatsApp Web. |
-
----
-
-## 12. Understanding checkpoint
-
-1. **Why not fine-tune?** It costs money or a GPU, freezes me in time, can't explain itself, and blends identity with memory. RAG avoids all four.
-2. **Persona vs history?** Persona = how I talk to each kind of person. History = what I've actually said before.
-3. **Why split history by relationship?** So a client never gets a reply shaped by my friends' banter, and searches stay relevant.
-4. **Which stages are the brains, and which are plumbing?** Retrieval is the History Brain, Persona Injection is the Persona Brain, Generation is where they combine. Router and Decision Engine are rules; Message In, Delay and Send are plumbing.
+| **LLM** | The AI model that writes text. Here, Google's Gemini. |
+| **RAG / retrieval** | "Look things up, then write": the agent finds relevant past replies before drafting. |
+| **Fine-tuning** | Retraining the AI model itself on your data. Not used here. |
+| **Embedding** | Turning a sentence into a list of numbers so "similar meaning" can be measured. |
+| **Vector database** | A database that searches by meaning instead of exact words. Here, ChromaDB. |
+| **Collection** | One searchable bucket in ChromaDB. There's one per relationship category. |
+| **Few-shot examples** | A few sample replies placed in the prompt to show the AI the style you want. |
+| **JID** | WhatsApp's ID for a chat, such as `919025877874@s.whatsapp.net` for a person or `…@g.us` for a group. |
+| **Baileys** | A Node.js library that connects to WhatsApp Web as a linked device. |
+| **Bridge** | The small local web server that connects the Node client to the Python agent. |
+| **Fail closed** | When unsure, choose the safe option, which here means don't reply. |
+| **DRY_RUN** | A mode where the client logs what it would send without sending anything. |
+| **Tanglish** | Tamil written in English letters, mixed with English. |

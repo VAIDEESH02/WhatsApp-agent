@@ -1,5 +1,7 @@
 # WhatsApp Agent
 
+[![Tests](https://github.com/VAIDEESH02/WhatsApp-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/VAIDEESH02/WhatsApp-agent/actions/workflows/tests.yml)
+
 Put your WhatsApp on cruise control. This project is a small AI assistant that reads incoming WhatsApp messages, works out who sent them, decides whether it's safe to answer, and drafts a reply in **your own voice** for that relationship. You don't text your mother the way you text a client, and neither does the agent.
 
 It has two "brains":
@@ -27,7 +29,7 @@ For how everything fits together, see [Architecture.md](Architecture.md).
 6. [Verification](#6-verification)
 7. [Going live safely](#7-going-live-safely)
 8. [Common issues](#8-common-issues)
-9. [Running the tests](#9-running-the-tests)
+9. [Running tests](#9-running-tests)
 
 ---
 
@@ -84,7 +86,7 @@ python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
 ```
 
-This installs Gemini's SDK (`google-genai`), `python-dotenv`, `chromadb`, `sentence-transformers`, `fastapi`, `uvicorn` and `pytest`.
+This installs Gemini's SDK (`google-genai`), `python-dotenv`, `chromadb`, `sentence-transformers`, `fastapi`, `pydantic`, `uvicorn` and `pytest`, each pinned to the version the project is tested with.
 
 **4. Install the Node packages.**
 
@@ -525,16 +527,47 @@ Google retires model versions from time to time. Change `MODEL` in `agent/gemini
 
 ---
 
-## 9. Running the tests
+## 9. Running tests
 
-The tests don't use WhatsApp or spend Gemini credits; those are replaced with stand-ins. ChromaDB does need to be running (Terminal 1), because some agent modules connect to it as they load, and the language model must have been downloaded once (step 5 of the setup).
+Run these from the project folder. ChromaDB must be running (Terminal 1), because some agent modules connect to it as they load, and the language model must have been downloaded once (step 5 of the setup). If pytest sits silently at the start, run `export HF_HUB_OFFLINE=1` first (see [Common issues](#8-common-issues)).
 
 ```bash
-python3 -m pytest agent/ console/ -q
-node --test whatsapp/baileys_client.test.js
+python3 -m pytest                            # all Python tests: agent/, console/ and config/
+node --test whatsapp/baileys_client.test.js  # the WhatsApp client
 ```
 
-Expected: `156 passed` for Python and `pass 15` for Node.
+Expected: `248 passed` for Python and `pass 37` for Node. Without an API key or a relationship map, a few Python tests show as skipped instead.
+
+Almost every test swaps Gemini, WhatsApp, and your private files for stand-ins, so it runs offline and costs nothing. Two kinds are marked, because they need something real:
+
+| Marker | Needs | On your machine | In CI |
+|---|---|---|---|
+| `live` | Your private `config/relationship_map.json` | Runs (skips itself if the file is missing) | Deselected with `-m "not live"` |
+| `gemini` | The real Gemini API: 3 small calls using `GEMINI_API_KEY` | Runs when the key is in `.env` or your shell, skips otherwise | Runs in its own job with the `GEMINI_API_KEY` secret. Rate limits and server errors are retried twice. |
+
+```bash
+python3 -m pytest -m "not gemini"               # skip the real Gemini calls (offline, free)
+python3 -m pytest -m gemini -v                  # only the Gemini smoke tests
+python3 -m pytest -m "not live and not gemini"  # exactly what the CI Python job runs
+```
+
+The key is read from the `GEMINI_API_KEY` environment variable (in `agent/gemini.py`). On your machine `.env` fills it in; in CI the repository secret does. The smoke tests use the agent's own `MODEL`, so a retired model fails CI before it breaks your replies.
+
+### Continuous integration
+
+`.github/workflows/tests.yml` runs on every push to `main`. You can also start it by hand: **Actions → Tests → Run workflow**. It has three independent jobs, each stopped after 15 minutes:
+
+| Job | What it does |
+|---|---|
+| **Python tests** | Python 3.13 with the pinned packages and CPU-only torch, the embedding model from the cache, and a throwaway ChromaDB in a temporary folder. Runs everything except `live` and `gemini` tests. |
+| **Gemini smoke tests** | The same setup, plus the `GEMINI_API_KEY` secret, which only this step receives. A Gemini outage or rate limit fails this job only. |
+| **Node tests** | Node 24 and `npm ci` with the npm cache, then the WhatsApp client tests. |
+
+The two Python jobs share their setup steps, in `.github/actions/python-env/action.yml`. The badge at the top of this page shows the latest run. It turns red if any job fails, the Gemini one included.
+
+**One-time setup:** on GitHub, open **Settings → Secrets and variables → Actions → New repository secret**. Name it `GEMINI_API_KEY` and paste your key.
+
+None of the Node tests needs a live WhatsApp session. If you add one that does, skip it in CI the same way: `test('…', { skip: process.env.CI && 'needs a live WhatsApp session' }, () => { … })`.
 
 ---
 

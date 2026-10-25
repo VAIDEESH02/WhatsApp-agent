@@ -1,7 +1,10 @@
-google-genai
-python-dotenv
-chromadb
-sentence-transformers
-pytest
-fastapi
-uvicorn[standard]
+# Pinned to the versions the project is tested with. Only packages the code imports directly;
+# pip picks their dependencies. torch comes with sentence-transformers (CI installs the CPU build).
+google-genai==2.17.0
+python-dotenv==1.2.2
+chromadb==1.5.9
+sentence-transformers==6.2.0
+pytest==9.1.1
+fastapi==0.136.1
+pydantic==2.14.1
+uvicorn[standard]==0.47.0

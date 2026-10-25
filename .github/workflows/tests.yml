@@ -1,0 +1,51 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/python-env
+      - name: Run pytest (live and Gemini tests deselected)
+        run: python -m pytest -m "not live and not gemini" -rs
+
+  gemini:
+    # Its own job, so a Gemini outage or rate limit fails only this job.
+    name: Gemini smoke tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/python-env
+      - name: Run the Gemini smoke tests (rate limits and server errors are retried)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "::error::No GEMINI_API_KEY repository secret (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+          python -m pytest -m gemini -v -rs
+
+  node:
+    name: Node tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: node --test whatsapp/baileys_client.test.js

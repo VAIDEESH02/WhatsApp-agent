@@ -8,7 +8,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from agent import approvals, bridge, settings
+from agent import approvals, bridge, decision_engine, settings
 
 
 def payload(**overrides):
@@ -38,6 +38,8 @@ def client(tmp_path, monkeypatch, switch):
     monkeypatch.setattr(approvals, "DB_PATH", tmp_path / "agent_state.sqlite3")  # never the real queue
     monkeypatch.setattr(bridge, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(bridge, "CONSOLE_FEED_PATH", tmp_path / "logs" / "console_feed.jsonl")
+    monkeypatch.setattr(decision_engine, "LOG_DIR", tmp_path / "logs")  # the real-pipeline tests log decisions
+    monkeypatch.setattr(decision_engine, "LOG_PATH", tmp_path / "logs" / "decision_log.jsonl")
     monkeypatch.setattr(bridge, "retrieve_similar", lambda rel, text, k: [{"their_message": "Lunch", "my_reply": "Kelambu", "distance": 0.1}])
     return TestClient(bridge.app)
 
@@ -152,8 +154,6 @@ def test_switch_is_read_on_every_request(client, monkeypatch, switch):
 def test_switch_on_never_auto_replies_to_groups_or_unknown_senders(client, switch, monkeypatch, jid, text):
     """Real pipeline (no stub): the hard rules stop these before any LLM call."""
     switch(True)
-    from agent import decision_engine
-
     monkeypatch.setattr(decision_engine, "_classify_intent", lambda t: (_ for _ in ()).throw(AssertionError("LLM reached")))
     body = client.post("/process", json=payload(jid=jid, text=text)).json()
     assert body["should_reply"] is False and body["status"] == "ignored" and body["reply"] is None

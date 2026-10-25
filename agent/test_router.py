@@ -101,9 +101,11 @@ def test_missing_map_file_falls_back_to_unknown(tmp_path):
     assert resolve_relationship(f"{KNOWN}@s.whatsapp.net", str(tmp_path / "missing.json")) == ("unknown", "unknown")
 
 
+@pytest.mark.live
 def test_real_map_routes_groups_and_known_contact():
     # Uses the project's own config/relationship_map.json (git-ignored, so skipped on a fresh
-    # clone). A number is read from the map itself, so no real number is written in this file.
+    # clone and deselected in CI). A number is read from the map itself, so no real number is
+    # written in this file.
     from agent.router import DEFAULT_KEY, DEFAULT_MAP_PATH, PROJECT_ROOT
 
     path = PROJECT_ROOT / DEFAULT_MAP_PATH

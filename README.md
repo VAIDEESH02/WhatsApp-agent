@@ -118,6 +118,7 @@ EOF
 | Variable | What it's for |
 |---|---|
 | `GEMINI_API_KEY` | Lets the agent call Gemini (model `gemini-3.5-flash`) to check each message and write drafts. |
+| `REPLY_DESK_ALLOWED_HOSTS` | Optional. Your Mac's private Tailscale name (e.g. `my-mac.tail1234.ts.net`), so you can open Reply Desk from your phone. Comma-separate several. See [Using Reply Desk from your phone](#using-reply-desk-from-your-phone). |
 
 `.env` is git-ignored, so your key never ends up on GitHub.
 
@@ -246,7 +247,26 @@ You'll see your three most similar past exchanges, each with a distance score (l
 
 ## 5. Running the application
 
-The app has four parts, each in its own terminal. Start them **in this order**, from the project folder, with `source .venv/bin/activate` run in each Python terminal.
+### The quick way: one command
+
+Pair WhatsApp once first (Terminal 4 below: run it, scan the QR code, press Ctrl+C). After that, start everything with:
+
+```bash
+./start.sh
+```
+
+It starts all four parts in order: ChromaDB, the bridge, Reply Desk, then the WhatsApp client. It also:
+
+- **restarts a part that crashes**, waiting 5 seconds at first and up to a minute if it keeps failing;
+- **keeps your Mac awake** while it runs (it uses macOS's `caffeinate`), so WhatsApp stays connected;
+- writes each part's output to `logs/services/<name>.log` (`tail -f logs/services/*.log` to watch);
+- **refuses to start** if any of the ports is already in use, so it never fights a copy you started yourself.
+
+Press **Ctrl+C** to stop everything it started. The Mac can still sleep if you close the lid (unless it's connected to an external display and power), and the agent is offline while it sleeps.
+
+### The manual way: four terminals
+
+Start each part **in this order**, from the project folder, with `source .venv/bin/activate` run in each Python terminal.
 
 **Terminal 1: ChromaDB** (the History Brain's database)
 
@@ -321,6 +341,32 @@ kill $(lsof -t -iTCP:8000 -sTCP:LISTEN)   # ChromaDB
 ```
 
 **Stop the agent acting without stopping any server:** press the red **🛑 Kill switch** in Reply Desk, or run `touch kill_switch.flag`. The WhatsApp client then ignores every message and sends nothing until you clear it (the **Clear kill switch** button, or `rm kill_switch.flag`).
+
+### Using Reply Desk from your phone
+
+Reply Desk only answers on your Mac. To use it from your phone or another of **your own** devices, wherever you are, connect them with [Tailscale](https://tailscale.com), a free private network between your devices. There is no public web address and no login page to attack: only devices signed in to your Tailscale account can reach it.
+
+1. **Install Tailscale** on your Mac and your phone, and sign in to the same account on both.
+2. **Find your Mac's Tailscale name:** `tailscale status`, or the Tailscale menu on the Mac. It looks like `my-mac.tail1234.ts.net`.
+3. **Tell Reply Desk to accept that name.** Add it to `.env`:
+
+   ```bash
+   echo 'REPLY_DESK_ALLOWED_HOSTS=my-mac.tail1234.ts.net' >> .env
+   ```
+
+   Then restart Reply Desk (or `./start.sh`). Any other name is still refused.
+4. **Share only Reply Desk over Tailscale, with HTTPS:**
+
+   ```bash
+   tailscale serve --bg http://127.0.0.1:5002
+   ```
+
+   The first time, Tailscale may print a link to turn on HTTPS certificates for your account; open it, approve, and run the command again. This setting survives restarts. Check it with `tailscale serve status`, and undo it with `tailscale serve reset`.
+5. On your phone, open **https://my-mac.tail1234.ts.net**. Add it to your home screen for one-tap access.
+
+**Never share ports 5001 (the bridge) or 8000 (ChromaDB)**, and don't change the servers to listen on `0.0.0.0`. Only Reply Desk is meant to be reached, and only through `tailscale serve`.
+
+Your Mac has to be on, awake and running the agent for this to work. `./start.sh` keeps it awake while it runs.
 
 ---
 

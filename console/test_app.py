@@ -161,6 +161,45 @@ def test_unknown_host_is_refused():
     assert response.status_code == 403
 
 
+# --- Remote access over a private network (REPLY_DESK_ALLOWED_HOSTS) ----------------------
+
+TAILNET = "my-mac.tail1234.ts.net"
+
+
+def remote(base=f"https://{TAILNET}"):
+    return TestClient(console.app, base_url=base)
+
+
+def test_tailnet_host_is_refused_until_listed(client, monkeypatch):
+    monkeypatch.delenv(console.EXTRA_HOSTS_ENV, raising=False)
+    assert remote().get("/api/feed").status_code == 403
+    monkeypatch.setenv(console.EXTRA_HOSTS_ENV, f" {TAILNET.upper()} , other.example.ts.net")
+    assert remote().get("/api/feed").status_code == 200
+
+
+def test_listed_host_can_write_only_from_its_https_origin(client, monkeypatch):
+    monkeypatch.setenv(console.EXTRA_HOSTS_ENV, TAILNET)
+    ok = remote().post("/api/auto-reply", json={"enabled": False}, headers={**WRITE, "Origin": f"https://{TAILNET}"})
+    assert ok.status_code == 200
+    for origin in (f"http://{TAILNET}", "https://evil.example", f"https://{TAILNET}.evil.example"):
+        refused = remote().post("/api/auto-reply", json={"enabled": True}, headers={**WRITE, "Origin": origin})
+        assert refused.status_code == 403
+    assert remote().post("/api/auto-reply", json={"enabled": True}).status_code == 403  # no X-Reply-Desk
+    assert settings.auto_reply_enabled() is False
+
+
+@pytest.mark.parametrize("value", ["*", "*.ts.net", "localhost", "my-mac.ts.net:8080", "https://my-mac.ts.net", "my mac.ts.net"])
+def test_malformed_extra_hosts_are_ignored(monkeypatch, value):
+    monkeypatch.setenv(console.EXTRA_HOSTS_ENV, value)
+    assert console.extra_hosts() == set()
+
+
+def test_unlisted_hosts_stay_refused_when_extras_are_set(monkeypatch):
+    monkeypatch.setenv(console.EXTRA_HOSTS_ENV, TAILNET)
+    assert TestClient(console.app, base_url="http://attacker.example:5002").get("/api/feed").status_code == 403
+    assert remote(f"https://attacker.{TAILNET}").get("/api/feed").status_code == 403
+
+
 # --- Client controls: settings.json and kill switch ---------------------------------------
 
 def test_controls_are_reported_with_safe_defaults(client):

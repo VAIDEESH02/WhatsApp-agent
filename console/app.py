@@ -13,15 +13,18 @@ POST /api/settings                  {"dry_run"?, "min_delay_seconds"?, "max_dela
                                     (only the given keys change; validated; written atomically)
 POST /api/kill-switch               {"active": true|false} -> creates/deletes kill_switch.flag
 
-Writes are accepted only from this page: the Host must be 127.0.0.1/localhost:5002, any
-Origin must be that same page, and the request must carry the X-Reply-Desk header (which a
-cross-site form or fetch cannot send without a CORS preflight this server never grants).
+Writes are accepted only from this page: the Host must be 127.0.0.1/localhost:5002 (or a
+private hostname listed in REPLY_DESK_ALLOWED_HOSTS, e.g. your Tailscale name, reached over
+https), any Origin must be that same page, and the request must carry the X-Reply-Desk header
+(which a cross-site form or fetch cannot send without a CORS preflight this server never grants).
 The client mode (DRY_RUN or LIVE) is read from config/settings.json, which the WhatsApp client
 re-reads for every message; the kill switch is the kill_switch.flag file it checks.
 Run: python3 console/app.py   ->   http://127.0.0.1:5002
 """
 
 import json
+import os
+import re
 import sys
 from collections import deque
 from functools import lru_cache
@@ -36,6 +39,7 @@ if INGESTION_DIR not in sys.path:  # ingestion modules import their siblings by 
     sys.path.insert(1, INGESTION_DIR)
 
 import uvicorn  # noqa: E402
+from dotenv import load_dotenv  # noqa: E402
 from fastapi import FastAPI, HTTPException, Request  # noqa: E402
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
@@ -56,6 +60,34 @@ FEED_LIMIT = 20
 REFRESH_MS = 2000
 ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 CSRF_HEADER = "x-reply-desk"
+# Extra hostnames for remote access over a private network, e.g. "my-mac.tail1234.ts.net".
+# Comma-separated, set in .env or the environment. Reached over https only (tailscale serve).
+EXTRA_HOSTS_ENV = "REPLY_DESK_ALLOWED_HOSTS"
+HOSTNAME = re.compile(r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$")
+
+load_dotenv(PROJECT_ROOT / ".env")
+
+
+def extra_hosts() -> set[str]:
+    """Hostnames from REPLY_DESK_ALLOWED_HOSTS. Anything that isn't a plain dotted hostname
+    (wildcards, ports, schemes, IPs without dots) is ignored, so a typo can't open the page up."""
+    names = (name.strip().lower() for name in os.environ.get(EXTRA_HOSTS_ENV, "").split(","))
+    return {name for name in names if HOSTNAME.match(name)}
+
+
+def _host_allowed(host: str | None) -> bool:
+    host = (host or "").lower()
+    return host in ALLOWED_HOSTS or host.removesuffix(":443") in extra_hosts()
+
+
+def _origin_allowed(origin: str) -> bool:
+    """The page's own origin: http for this Mac, https for an extra (remote) hostname."""
+    origin = origin.lower()
+    if origin.startswith("http://"):
+        return origin.removeprefix("http://") in ALLOWED_HOSTS
+    if origin.startswith("https://"):
+        return origin.removeprefix("https://").removesuffix(":443") in extra_hosts()
+    return False
 
 app = FastAPI(title="Reply Desk")
 
@@ -63,11 +95,11 @@ app = FastAPI(title="Reply Desk")
 @app.middleware("http")
 async def local_page_only(request: Request, call_next):
     """Block DNS-rebinding (Host) and cross-site writes (Origin + custom header)."""
-    if request.headers.get("host") not in ALLOWED_HOSTS:
+    if not _host_allowed(request.headers.get("host")):
         return JSONResponse({"detail": "unknown host"}, status_code=403)
     if request.method not in ("GET", "HEAD", "OPTIONS"):
         origin = request.headers.get("origin")
-        if origin and origin.removeprefix("http://") not in ALLOWED_HOSTS:
+        if origin and not _origin_allowed(origin):
             return JSONResponse({"detail": "cross-site request refused"}, status_code=403)
         if request.headers.get(CSRF_HEADER) != "1":
             return JSONResponse({"detail": "missing X-Reply-Desk header"}, status_code=403)

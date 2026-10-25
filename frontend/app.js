@@ -6,6 +6,8 @@
 const POLL_MS = 2000;
 const WRITE_HEADERS = { 'Content-Type': 'application/json', 'X-Reply-Desk': '1' };
 const THEME_KEY = 'reply-desk-theme';
+const CONTROLS_KEY = 'reply-desk-controls'; // "open" | "closed", remembered per browser
+const WIDE = window.matchMedia('(min-width: 981px)');
 
 const REL_LABEL = {
   family: 'family', friends: 'friends', professional: 'professional', girlfriend: 'girlfriend',
@@ -19,7 +21,7 @@ const DECISION = {
   error: ['Error', 'state-stop'],
 };
 const APPROVAL = {
-  pending: ['Waiting', 'state-hold'],
+  pending: ['Waiting for you', 'state-hold'],
   approved: ['Queued to send', 'state-ok'],
   sent: ['Sent', 'state-ok'],
   dry_run: ['Logged (dry run)', 'state-hold'],
@@ -103,7 +105,7 @@ function tickLive() {
   if ($('live').classList.contains('is-down')) {
     text.textContent = `Offline · retrying (last update ${seconds}s ago)`;
   } else {
-    text.textContent = seconds <= 1 ? 'Live · updated just now' : `Live · updated ${seconds}s ago`;
+    text.textContent = seconds <= 1 ? 'Connected · updated just now' : `Connected · updated ${seconds}s ago`;
   }
 }
 
@@ -114,6 +116,9 @@ function renderHeader(data) {
   sw.setAttribute('aria-checked', String(state.autoEnabled));
   $('auto-state').textContent = state.autoEnabled ? 'On' : 'Off';
   $('auto-banner').hidden = !state.autoEnabled;
+  const autoPill = $('auto-pill');
+  autoPill.textContent = state.autoEnabled ? 'Auto-reply on' : 'Auto-reply off';
+  autoPill.classList.toggle('pill--on', state.autoEnabled);
 
   state.mode = (data.mode || 'unknown').toUpperCase();
   if (data.controls) renderControls(data.controls);
@@ -126,6 +131,10 @@ function renderControls(controls) {
   liveSwitch.disabled = false;
   liveSwitch.setAttribute('aria-checked', String(live));
   $('live-state').textContent = live ? 'Live' : 'Dry run';
+  const modePill = $('mode-pill');
+  modePill.textContent = live ? 'Live sending' : 'Dry run';
+  modePill.classList.toggle('pill--live', live);
+  modePill.classList.toggle('pill--dry', !live);
 
   const killOn = controls.kill_switch_active === true;
   $('kill-banner').hidden = !killOn;
@@ -161,6 +170,24 @@ async function setKillSwitch(active) {
   } catch (error) {
     toast(`Couldn't ${active ? 'turn on' : 'clear'} the kill switch: ${error.message}`, true);
   }
+}
+
+// The Controls panel: open by default on wide screens, closed on phones, then as you leave it.
+function initControlsPanel() {
+  const toggle = $('controls-toggle');
+  const panel = $('controls-panel');
+  const show = (open) => {
+    panel.hidden = !open;
+    toggle.setAttribute('aria-expanded', String(open));
+  };
+  let saved = null;
+  try { saved = localStorage.getItem(CONTROLS_KEY); } catch (error) { /* storage unavailable */ }
+  show(saved ? saved === 'open' : WIDE.matches);
+  toggle.addEventListener('click', () => {
+    const open = panel.hidden;
+    show(open);
+    try { localStorage.setItem(CONTROLS_KEY, open ? 'open' : 'closed'); } catch (error) { /* still toggles */ }
+  });
 }
 
 function initControls() {
@@ -360,10 +387,13 @@ function buildEntry(record, key) {
   const entry = el('li', 'entry');
   entry.append(whoRow(record.contact_name, record.relationship, record.timestamp));
 
+  // One chip: the message's current state. Once a held draft is decided, its approval status
+  // replaces "Waiting for you".
   const states = el('div', 'who');
   states.style.marginTop = '8px';
-  states.append(stateChip(DECISION[record.decision] || [record.decision || '?', 'state-idle']));
-  if (record.approval_status) states.append(stateChip(APPROVAL[record.approval_status] || [record.approval_status, 'state-idle']));
+  states.append(stateChip(record.approval_status
+    ? APPROVAL[record.approval_status] || [record.approval_status, 'state-idle']
+    : DECISION[record.decision] || [record.decision || '?', 'state-idle']));
   entry.append(states);
 
   if (record.text) entry.append(el('p', 'bubble', record.text));
@@ -455,6 +485,7 @@ async function poll() {
   }
 }
 
+initControlsPanel();
 initSwitches();
 initControls();
 setInterval(tickLive, 1000);
